@@ -26,6 +26,7 @@ import {
 export const authRouter = Router();
 
 const authRouteRateLimiters = {
+  signup: rateLimiter({ bucket: "auth:signup", max: 10, algorithm: "sliding" }),
   login: rateLimiter({ bucket: "auth:login", max: 10, algorithm: "sliding" }),
   forgotPassword: rateLimiter({
     bucket: "auth:forgot-password",
@@ -43,7 +44,11 @@ const authRouteRateLimiters = {
 export function signupErrorToAppError(err: SignupError): AppError | RateLimitError | ConflictError {
   switch (err.type) {
     case "RATE_LIMITED":
-      return new RateLimitError(err.message);
+      return new RateLimitError(
+        err.message,
+        typeof err.retryAfterMs === "number" ? { retryAfterMs: err.retryAfterMs } : undefined,
+        err.retryAfterMs,
+      );
     case "EMAIL_EXISTS":
       return new ConflictError(err.message);
     default:
@@ -111,6 +116,9 @@ async function handleSignup(req: Request, res: Response): Promise<void> {
   } catch (error) {
     applySignupRateLimitHeaders(res, clientIp, emailForHeaders);
     if (error instanceof SignupError) {
+      if (typeof error.retryAfterMs === "number" && error.retryAfterMs > 0 && !res.getHeader("Retry-After")) {
+        res.setHeader("Retry-After", String(Math.ceil(error.retryAfterMs / 1000)));
+      }
       throw signupErrorToAppError(error);
     }
     throw error;
@@ -135,7 +143,11 @@ authRouter.post(
   asyncErrorHandler(handleRefresh),
 );
 
-authRouter.post("/signup", asyncErrorHandler(handleSignup));
+authRouter.post(
+  "/signup",
+  authRouteRateLimiters.signup,
+  asyncErrorHandler(handleSignup),
+);
 
 authRouter.get("/signup/availability", (req: Request, res: Response) => {
   const clientIp = getClientIp(req);
